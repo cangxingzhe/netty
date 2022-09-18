@@ -44,9 +44,13 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(AbstractChannel.class);
 
+    //channel是由创建层次的，比如ServerSocketChannel 是 SocketChannel的 parent
     private final Channel parent;
+    //channel全局唯一ID machineId+processId+sequence+timestamp+random
     private final ChannelId id;
+    //unsafe用于封装对底层socket的相关操作
     private final Unsafe unsafe;
+    //为channel分配独立的pipeline用于IO事件编排
     private final DefaultChannelPipeline pipeline;
     private final VoidChannelPromise unsafeVoidPromise = new VoidChannelPromise(this, false);
     private final CloseFuture closeFuture = new CloseFuture(this);
@@ -70,8 +74,11 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
      */
     protected AbstractChannel(Channel parent) {
         this.parent = parent;
+        //channel全局唯一ID machineId+processId+sequence+timestamp+random
         id = newId();
+        //unsafe用于底层socket的读写操作
         unsafe = newUnsafe();
+        //为channel分配独立的pipeline用于IO事件编排
         pipeline = newChannelPipeline();
     }
 
@@ -428,8 +435,10 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
      */
     protected abstract class AbstractUnsafe implements Unsafe {
 
+        //待发送数据缓冲队列  Netty是全异步框架，所以这里需要一个缓冲队列来缓存用户需要发送的数据
         private volatile ChannelOutboundBuffer outboundBuffer = new ChannelOutboundBuffer(AbstractChannel.this);
         private RecvByteBufAllocator.Handle recvHandle;
+        //是否正在进行flush操作
         private boolean inFlush0;
         /** true if the channel has never been registered, false otherwise */
         private boolean neverRegistered = true;
@@ -461,6 +470,9 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             return remoteAddress0();
         }
 
+        /**
+         * 注册Channel到绑定的Reactor上
+         * */
         @Override
         public final void register(EventLoop eventLoop, final ChannelPromise promise) {
             ObjectUtil.checkNotNull(eventLoop, "eventLoop");
@@ -468,14 +480,22 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                 promise.setFailure(new IllegalStateException("registered to an event loop already"));
                 return;
             }
+            //EventLoop的类型要与Channel的类型一样  Nio Oio Aio
             if (!isCompatible(eventLoop)) {
                 promise.setFailure(
                         new IllegalStateException("incompatible event loop type: " + eventLoop.getClass().getName()));
                 return;
             }
 
+            //在channel上设置绑定的Reactor
             AbstractChannel.this.eventLoop = eventLoop;
 
+            /**
+             * 执行channel注册的操作必须是Reactor线程来完成
+             *
+             * 1: 如果当前执行线程是Reactor线程，则直接执行register0进行注册
+             * 2：如果当前执行线程是外部线程，则需要将register0注册操作 封装程异步Task 由Reactor线程执行
+             * */
             if (eventLoop.inEventLoop()) {
                 register0(promise);
             } else {
@@ -499,22 +519,30 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
         private void register0(ChannelPromise promise) {
             try {
+                //查看注册操作是否已经取消，或者对应channel已经关闭
                 // check if the channel is still open as it could be closed in the mean time when the register
                 // call was outside of the eventLoop
                 if (!promise.setUncancellable() || !ensureOpen(promise)) {
                     return;
                 }
                 boolean firstRegistration = neverRegistered;
+                //执行真正的注册操作
                 doRegister();
+                //修改注册状态
                 neverRegistered = false;
                 registered = true;
 
+                //回调pipeline中添加的ChannelInitializer的handlerAdded方法，在这里初始化channelPipeline
                 // Ensure we call handlerAdded(...) before we actually notify the promise. This is needed as the
                 // user may already fire events through the pipeline in the ChannelFutureListener.
                 pipeline.invokeHandlerAddedIfNeeded();
 
+                //设置regFuture为success，触发operationComplete回调,将bind操作放入Reactor的任务队列中，等待Reactor线程执行。
                 safeSetSuccess(promise);
+                //触发channelRegister事件
                 pipeline.fireChannelRegistered();
+                //对于服务端ServerSocketChannel来说 只有绑定端口地址成功后 channel的状态才是active的。
+                //此时绑定操作作为异步任务在Reactor的任务队列中，绑定操作还没开始，所以这里的isActive()是false
                 // Only fire a channelActive if the channel has never been registered. This prevents firing
                 // multiple channel actives if the channel is deregistered and re-registered.
                 if (isActive()) {
@@ -557,8 +585,11 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                         "address (" + localAddress + ") anyway as requested.");
             }
 
+            //这时channel还未激活  wasActive = false
             boolean wasActive = isActive();
             try {
+                //io.netty.channel.socket.nio.NioServerSocketChannel.doBind
+                //调用具体channel实现类
                 doBind(localAddress);
             } catch (Throwable t) {
                 safeSetFailure(promise, t);
@@ -566,10 +597,12 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                 return;
             }
 
+            //绑定成功后 channel激活 触发channelActive事件传播
             if (!wasActive && isActive()) {
                 invokeLater(new Runnable() {
                     @Override
                     public void run() {
+                        //pipeline中触发channelActive事件
                         pipeline.fireChannelActive();
                     }
                 });
@@ -847,6 +880,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
         public final void write(Object msg, ChannelPromise promise) {
             assertEventLoop();
 
+            //获取当前channel对应的待发送数据缓冲队列（支持用户异步写入的核心关键）
             ChannelOutboundBuffer outboundBuffer = this.outboundBuffer;
             if (outboundBuffer == null) {
                 try {
@@ -865,7 +899,13 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
             int size;
             try {
+                /**
+                 * 在网络数据传输的过程中，Netty为了减少数据从 堆内内存 到 堆外内存 的拷贝以及缓解GC的压力，
+                 * 所以这里必须采用 DirectByteBuffer 使用堆外内存来存放网络发送数据。
+                 */
+                //过滤message类型 这里只会接受DirectBuffer或者fileRegion类型的msg
                 msg = filterOutboundMessage(msg);
+                //计算当前msg的大小
                 size = pipeline.estimatorHandle().size(msg);
                 if (size < 0) {
                     size = 0;
@@ -879,6 +919,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                 return;
             }
 
+            //将msg 加入到Netty中的待写入数据缓冲队列ChannelOutboundBuffer中
             outboundBuffer.addMessage(msg, size, promise);
         }
 
@@ -887,11 +928,14 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             assertEventLoop();
 
             ChannelOutboundBuffer outboundBuffer = this.outboundBuffer;
+            //channel以关闭
             if (outboundBuffer == null) {
                 return;
             }
 
+            //将flushedEntry指针指向ChannelOutboundBuffer头结点，此时变为即将要flush进Socket的数据队列
             outboundBuffer.addFlush();
+            //将待写数据写进Socket
             flush0();
         }
 
@@ -903,6 +947,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             }
 
             final ChannelOutboundBuffer outboundBuffer = this.outboundBuffer;
+            //如果 channel 已经关闭了或者对应写缓冲区中没有任何数据，那么就停止发送流程，直接 return。
             if (outboundBuffer == null || outboundBuffer.isEmpty()) {
                 return;
             }
@@ -915,8 +960,10 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                     // Check if we need to generate the exception at all.
                     if (!outboundBuffer.isEmpty()) {
                         if (isOpen()) {
+                            //当前channel处于disConnected状态  通知promise 写入失败 并触发channelWritabilityChanged事件
                             outboundBuffer.failFlushed(new NotYetConnectedException(), true);
                         } else {
+                            //当前channel处于关闭状态 通知promise 写入失败 但不触发channelWritabilityChanged事件
                             // Do not trigger channelWritabilityChanged because the channel is closed already.
                             outboundBuffer.failFlushed(newClosedChannelException(initialCloseCause, "flush0()"), false);
                         }

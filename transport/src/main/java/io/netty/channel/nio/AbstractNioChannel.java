@@ -49,9 +49,11 @@ public abstract class AbstractNioChannel extends AbstractChannel {
 
     private static final InternalLogger logger =
             InternalLoggerFactory.getInstance(AbstractNioChannel.class);
-
+    //JDK NIO原生Selectable Channel
     private final SelectableChannel ch;
+    // Channel监听事件集合 这里是SelectionKey.OP_ACCEPT事件
     protected final int readInterestOp;
+    //channel注册到Selector后获得的SelectKey
     volatile SelectionKey selectionKey;
     boolean readPending;
     private final Runnable clearReadPendingRunnable = new Runnable() {
@@ -81,6 +83,7 @@ public abstract class AbstractNioChannel extends AbstractChannel {
         this.ch = ch;
         this.readInterestOp = readInterestOp;
         try {
+            //设置Channel为非阻塞 配合IO多路复用模型
             ch.configureBlocking(false);
         } catch (IOException e) {
             try {
@@ -377,6 +380,7 @@ public abstract class AbstractNioChannel extends AbstractChannel {
         boolean selected = false;
         for (;;) {
             try {
+                //向`Reactor`中的`Selector`注册的`IO事件`为`0`，这个操作的主要目的是先获取到`Channel`在`Selector`中对应的`SelectionKey`
                 selectionKey = javaChannel().register(eventLoop().unwrappedSelector(), 0, this);
                 return;
             } catch (CancelledKeyException e) {
@@ -409,8 +413,13 @@ public abstract class AbstractNioChannel extends AbstractChannel {
 
         readPending = true;
 
+        /**
+         * 1：ServerSocketChannel 初始化时 readInterestOp设置的是OP_ACCEPT事件
+         * 2：SocketChannel 初始化时 readInterestOp设置的是OP_READ事件
+         * */
         final int interestOps = selectionKey.interestOps();
         if ((interestOps & readInterestOp) == 0) {
+            //注册监听OP_ACCEPT或者OP_READ事件
             selectionKey.interestOps(interestOps | readInterestOp);
         }
     }

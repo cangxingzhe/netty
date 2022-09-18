@@ -52,6 +52,9 @@ import static java.lang.Math.min;
  * </p>
  */
 public final class ChannelOutboundBuffer {
+    //不考虑指针压缩的大小 entry对象在堆中占用的内存大小为96
+    //如果开启指针压缩，entry对象在堆中占用的内存大小 会是64
+
     // Assuming a 64-bit JVM:
     //  - 16 bytes object header
     //  - 6 reference fields
@@ -92,6 +95,7 @@ public final class ChannelOutboundBuffer {
     private static final AtomicLongFieldUpdater<ChannelOutboundBuffer> TOTAL_PENDING_SIZE_UPDATER =
             AtomicLongFieldUpdater.newUpdater(ChannelOutboundBuffer.class, "totalPendingSize");
 
+    //水位线指针.ChannelOutboundBuffer中的待发送数据的内存占用总量 : 所有Entry对象本身所占用内存大小 + 所有待发送数据的大小
     @SuppressWarnings("UnusedDeclaration")
     private volatile long totalPendingSize;
 
@@ -146,6 +150,7 @@ public final class ChannelOutboundBuffer {
             }
             do {
                 flushed ++;
+                //如果当前entry对应的write操作被用户取消，则释放msg，并降低channelOutboundBuffer水位线
                 if (!entry.promise.setUncancellable()) {
                     // Was cancelled so make sure we free up memory and notify about the freed bytes
                     int pending = entry.cancel();
@@ -172,8 +177,11 @@ public final class ChannelOutboundBuffer {
             return;
         }
 
+        //更新总共待写入数据的大小
         long newWriteBufferSize = TOTAL_PENDING_SIZE_UPDATER.addAndGet(this, size);
+        //如果待写入的数据 大于 高水位线 64 * 1024  则设置当前channel为不可写 由用户自己决定是否继续写入
         if (newWriteBufferSize > channel.config().getWriteBufferHighWaterMark()) {
+            //设置当前channel状态为不可写，并触发fireChannelWritabilityChanged事件
             setUnwritable(invokeLater);
         }
     }
@@ -291,6 +299,7 @@ public final class ChannelOutboundBuffer {
     private boolean remove0(Throwable cause, boolean notifyWritability) {
         Entry e = flushedEntry;
         if (e == null) {
+            //清空当前reactor线程缓存的所有待发送数据
             clearNioBuffers();
             return false;
         }
@@ -299,16 +308,22 @@ public final class ChannelOutboundBuffer {
         ChannelPromise promise = e.promise;
         int size = e.pendingSize;
 
+        //从channelOutboundBuffer中删除该Entry节点
         removeEntry(e);
 
         if (!e.cancelled) {
+            //释放msg所占用的内存空间
             // only release message, fail and decrement if it was not canceled before.
             ReferenceCountUtil.safeRelease(msg);
 
+            //编辑promise发送失败，并通知相应的Lisener
             safeFail(promise, cause);
+            //由于msg得到释放，所以需要降低channelOutboundBuffer中的内存占用水位线，并根据notifyWritability决定是否触发
+            // ChannelWritabilityChanged事件
             decrementPendingOutboundBytes(size, false, notifyWritability);
         }
 
+        //回收Entry实例对象
         // recycle the entry
         e.recycle();
 
@@ -587,6 +602,8 @@ public final class ChannelOutboundBuffer {
 
     private void setWritable(boolean invokeLater) {
         for (;;) {
+            //当 Channel 的状态是第一次从不可写状态变为可写状态时，Netty 会在 pipeline 中再次触发 ChannelWritabilityChanged
+            // 事件的传播。
             final int oldValue = unwritable;
             final int newValue = oldValue & ~1;
             if (UNWRITABLE_UPDATER.compareAndSet(this, oldValue, newValue)) {
@@ -805,16 +822,31 @@ public final class ChannelOutboundBuffer {
             }
         });
 
+        //DefaultHandle用于回收对象
         private final Handle<Entry> handle;
+        //ChannelOutboundBuffer下一个节点
         Entry next;
+        //应用程序待发送的网络数据，这里 msg 的类型为 DirectByteBuffer 或者 FileRegion（用于通过零拷贝的方式网络传输文件）
+        //待发送数据
         Object msg;
+        //这里的 ByteBuffer 类型为 JDK NIO 原生的 ByteBuffer 类型，因为 Netty 最终发送数据是通过 JDK NIO 底层的
+        // SocketChannel 进行发送，所以需要将 Netty 中实现的 ByteBuffer 类型转换为 JDK NIO ByteBuffer 类型。应
+        // 用程序发送的 ByteBuffer 可能是一个也可能是多个，如果发送多个就用 ByteBuffer[] bufs 封装在 Entry 对象中，
+        // 如果是一个就用 ByteBuffer buf 封装。
+        //msg 转换为 jdk nio 中的byteBuffer
         ByteBuffer[] bufs;
         ByteBuffer buf;
+        //异步write操作的future
         ChannelPromise promise;
+        //已发送了多少
         long progress;
+        //总共需要发送多少，不包含entry对象大小。
         long total;
+        //pendingSize表示entry对象在堆中需要的内存总量 待发送数据大小 + entry对象本身在堆中占用内存大小（96）
         int pendingSize;
+        //msg中包含了几个jdk nio bytebuffer
         int count = -1;
+        //write操作是否被取消
         boolean cancelled;
 
         private Entry(Handle<Entry> handle) {

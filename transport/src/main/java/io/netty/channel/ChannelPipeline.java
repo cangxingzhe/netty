@@ -374,6 +374,7 @@ public interface ChannelPipeline
      * @param handlers  the handlers to insert last
      *
      */
+    //向pipeline的末尾处批量添加多个channelHandler
     ChannelPipeline addLast(ChannelHandler... handlers);
 
     /**
@@ -384,6 +385,7 @@ public interface ChannelPipeline
      * @param handlers  the handlers to insert last
      *
      */
+    //指定channelHandler的executor，由指定的executor执行channelHandler中的回调方法
     ChannelPipeline addLast(EventExecutorGroup group, ChannelHandler... handlers);
 
     /**

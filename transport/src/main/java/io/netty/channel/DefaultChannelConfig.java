@@ -58,6 +58,7 @@ public class DefaultChannelConfig implements ChannelConfig {
     protected final Channel channel;
 
     private volatile ByteBufAllocator allocator = ByteBufAllocator.DEFAULT;
+    //用于Channel接收数据用的buffer分配器  类型为AdaptiveRecvByteBufAllocator
     private volatile RecvByteBufAllocator rcvBufAllocator;
     private volatile MessageSizeEstimator msgSizeEstimator = DEFAULT_MSG_SIZE_ESTIMATOR;
 
@@ -338,8 +339,10 @@ public class DefaultChannelConfig implements ChannelConfig {
     public ChannelConfig setAutoRead(boolean autoRead) {
         boolean oldAutoRead = AUTOREAD_UPDATER.getAndSet(this, autoRead ? 1 : 0) == 1;
         if (autoRead && !oldAutoRead) {
+            //autoRead从false变为true
             channel.read();
         } else if (!autoRead && oldAutoRead) {
+            //autoRead从true变为false
             autoReadCleared();
         }
         return this;

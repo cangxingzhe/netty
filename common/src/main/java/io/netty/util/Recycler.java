@@ -49,7 +49,9 @@ public abstract class Recycler<T> {
             return "NOOP_HANDLE";
         }
     };
+    //对象池中每个线程对应的Stack中可以存储池化对象的默认初始最大个数 默认为4096个对象
     private static final int DEFAULT_INITIAL_MAX_CAPACITY_PER_THREAD = 4 * 1024; // Use 4k instances as default.
+    // 对象池中线程对应的Stack可以存储池化对象默认最大个数 4096
     private static final int DEFAULT_MAX_CAPACITY_PER_THREAD;
     private static final int RATIO;
     private static final int DEFAULT_QUEUE_CHUNK_SIZE_PER_THREAD;
