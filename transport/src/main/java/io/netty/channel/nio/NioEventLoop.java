@@ -538,6 +538,7 @@ public final class NioEventLoop extends SingleThreadEventLoop {
                         //不管有无IO就绪事件，必须唤醒selector，从而使reactor线程执行定时任务
                         nextWakeupNanos.set(curDeadlineNanos);
                         try {
+                            //再次检查一下是否有`异步任务`需要执行
                             if (!hasTasks()) {
                                 //再次检查普通任务队列中是否有异步任务
                                 //没有的话开始select阻塞轮询IO就绪事件
@@ -729,9 +730,11 @@ public final class NioEventLoop extends SingleThreadEventLoop {
             final Object a = k.attachment();
             i.remove();
 
+            //无论是服务端使用的`NioServerSocketChannel`还是客户端使用的`NioSocketChannel`都属于`AbstractNioChannel`。`Channel`上的`IO事件`是由Netty框架负责处理，也是本小节我们要重点介绍的
             if (a instanceof AbstractNioChannel) {
                 processSelectedKey(k, (AbstractNioChannel) a);
             } else {
+                //这种类型是Netty提供给用户可以自定义一些当`Channel`上发生`IO就绪事件`时的自定义处理。
                 @SuppressWarnings("unchecked")
                 NioTask<SelectableChannel> task = (NioTask<SelectableChannel>) a;
                 processSelectedKey(k, task);

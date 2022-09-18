@@ -53,12 +53,16 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
     //为channel分配独立的pipeline用于IO事件编排
     private final DefaultChannelPipeline pipeline;
     private final VoidChannelPromise unsafeVoidPromise = new VoidChannelPromise(this, false);
+
+    // 关闭channel操作的指定future，来判断关闭流程进度 每个channel对应一个CloseFuture
+    // 连接关闭之后，netty 会通知这个CloseFuture
     private final CloseFuture closeFuture = new CloseFuture(this);
 
     private volatile SocketAddress localAddress;
     private volatile SocketAddress remoteAddress;
     private volatile EventLoop eventLoop;
     private volatile boolean registered;
+    // channel的关闭流程是否已经开始
     private boolean closeInitiated;
     private Throwable initialCloseCause;
 
@@ -294,6 +298,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
     @Override
     public Channel read() {
+        //触发read事件
         pipeline.read();
         return this;
     }
@@ -673,11 +678,13 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                 return;
             }
 
+            //如果Channel已经close了，直接返回
             final ChannelOutboundBuffer outboundBuffer = this.outboundBuffer;
             if (outboundBuffer == null) {
                 promise.setFailure(new ClosedChannelException());
                 return;
             }
+            //半关闭状态下，不允许继续写入数据到Socket
             this.outboundBuffer = null; // Disallow adding any messages and flushes to outboundBuffer.
 
             final Throwable shutdownCause = cause == null ?
@@ -689,6 +696,7 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             // can still receive and process the data which is send by another side in the close_wait state。
             // See https://github.com/netty/netty/issues/11981
             try {
+                // 将jdk nio 底层的Socket shutdown
                 // The shutdown function does not block regardless of the SO_LINGER setting on the socket
                 // so we don't need to use GlobalEventExecutor to execute the shutdown
                 doShutdownOutput();
@@ -696,28 +704,37 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
             } catch (Throwable err) {
                 promise.setFailure(err);
             } finally {
+                //清理ChannelOutboundBuffer，并触发ChannelOutputShutdownEvent事件
                 closeOutboundBufferForShutdown(pipeline, outboundBuffer, shutdownCause);
             }
         }
 
         private void closeOutboundBufferForShutdown(
                 ChannelPipeline pipeline, ChannelOutboundBuffer buffer, Throwable cause) {
+            //shutdownOutput半关闭后需要清理channelOutboundBuffer中的待发送数据flushedEntry
             buffer.failFlushed(cause, false);
+            //循环清理channelOutboundBuffer中的unflushedEntry
             buffer.close(cause, true);
             pipeline.fireUserEventTriggered(ChannelOutputShutdownEvent.INSTANCE);
         }
 
+        // 关闭channel操作的指定future，来判断关闭流程进度 每个channel对应一个CloseFuture
+        // 连接关闭之后，netty 会通知这个CloseFuture
         private void close(final ChannelPromise promise, final Throwable cause,
                            final ClosedChannelException closeCause, final boolean notify) {
             if (!promise.setUncancellable()) {
+                //关闭操作如果被取消则直接返回
                 return;
             }
 
             if (closeInitiated) {
+                //如果此时channel已经开始关闭流程，则进入这里
                 if (closeFuture.isDone()) {
+                    //如果channel已经关闭 则设置promise为success，如果promise是voidPromise类型则会跳过
                     // Closed already.
                     safeSetSuccess(promise);
                 } else if (!(promise instanceof VoidChannelPromise)) { // Only needed if no VoidChannelPromise.
+                    //如果promise不是voidPromise，则会在关闭完成后 通过closeFuture设置promise success
                     // This means close() was called before so we just register a listener and return
                     closeFuture.addListener(new ChannelFutureListener() {
                         @Override
@@ -726,32 +743,46 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                         }
                     });
                 }
+                // 直接返回，防止重复关闭
                 return;
             }
 
+            //当前channel现在开始进入正在关闭状态
             closeInitiated = true;
 
+            //当前channel是否active，这里肯定是active的
             final boolean wasActive = isActive();
             final ChannelOutboundBuffer outboundBuffer = this.outboundBuffer;
+            //将channel对应的写缓冲区channelOutboundBuffer设置为null 表示channel要关闭了，不允许继续发送数据
+            //此时如果还在write数据，则直接释放bytebuffer，并立马 fail 相关writeFuture 并抛出newClosedChannelException异常
+            //此时如果执行flush，则会直接返回
             this.outboundBuffer = null; // Disallow adding any messages and flushes to outboundBuffer.
+            //如果开启了SO_LINGER，则需要先将channel从reactor中取消掉。避免reactor线程空转浪费cpu
             Executor closeExecutor = prepareToClose();
             if (closeExecutor != null) {
                 closeExecutor.execute(new Runnable() {
                     @Override
                     public void run() {
                         try {
+                            // 在GlobalEventExecutor中执行channel的关闭任务,设置closeFuture,promise success
                             // Execute the close.
                             doClose0(promise);
                         } finally {
+                            // reactor线程中执行
                             // Call invokeLater so closeAndDeregister is executed in the EventLoop again!
                             invokeLater(new Runnable() {
                                 @Override
                                 public void run() {
                                     if (outboundBuffer != null) {
+                                        // cause = closeCause = ClosedChannelException, notify = false
+                                        // 此时channel已经关闭，需要清理对应channelOutboundBuffer中的待发送数据flushedEntry
                                         // Fail all the queued messages
                                         outboundBuffer.failFlushed(cause, notify);
+                                        //循环清理channelOutboundBuffer中的unflushedEntry
                                         outboundBuffer.close(closeCause);
                                     }
+                                    //这里的active = true
+                                    //关闭channel后，会将channel从reactor中注销，首先触发ChannelInactive事件，然后触发ChannelUnregistered
                                     fireChannelInactiveAndDeregister(wasActive);
                                 }
                             });
@@ -784,11 +815,16 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
 
         private void doClose0(ChannelPromise promise) {
             try {
+                // 关闭channel，此时服务端向客户端发送fin2，服务端进入last_ack状态，客户端收到fin2进入time_wait状态
                 doClose();
+                // 设置clostFuture的状态为success，表示channel已经关闭
+                // 调用shutdownOutput则不会通知closeFuture
                 closeFuture.setClosed();
+                // 通知用户promise success,关闭操作已经完成
                 safeSetSuccess(promise);
             } catch (Throwable t) {
                 closeFuture.setClosed();
+                // 通知用户线程关闭失败
                 safeSetFailure(promise, t);
             }
         }
@@ -838,11 +874,13 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                 @Override
                 public void run() {
                     try {
+                        //将channel从reactor中注销，reactor不在监听channel上的事件
                         doDeregister();
                     } catch (Throwable t) {
                         logger.warn("Unexpected exception occurred while deregistering a channel.", t);
                     } finally {
                         if (fireChannelInactive) {
+                            //当channel被关闭后，触发ChannelInactive事件
                             pipeline.fireChannelInactive();
                         }
                         // Some transports like local and AIO does not allow the deregistration of
@@ -850,9 +888,12 @@ public abstract class AbstractChannel extends DefaultAttributeMap implements Cha
                         // close() calls deregister() again - no need to fire channelUnregistered, so check
                         // if it was registered.
                         if (registered) {
+                            //如果channel没有注册，则不需要触发ChannelUnregistered
                             registered = false;
+                            //随后触发ChannelUnregistered
                             pipeline.fireChannelUnregistered();
                         }
+                        //通知deRegisterPromise
                         safeSetSuccess(promise);
                     }
                 }

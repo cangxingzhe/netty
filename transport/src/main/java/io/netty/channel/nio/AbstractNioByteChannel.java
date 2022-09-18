@@ -97,11 +97,13 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
     protected class NioByteUnsafe extends AbstractNioUnsafe {
 
         private void closeOnRead(ChannelPipeline pipeline) {
+            //判断服务端连接接收方向是否关闭，这里肯定是没有关闭的
             if (!isInputShutdown0()) {
                 if (isAllowHalfClosure(config())) {
                     shutdownInput();
                     pipeline.fireUserEventTriggered(ChannelInputShutdownEvent.INSTANCE);
                 } else {
+                    //如果不支持半关闭，则服务端直接调用close方法向客户端发送fin,结束close_wait状态进如last_ack状态
                     close(voidPromise());
                 }
             } else {
@@ -115,6 +117,7 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
             if (byteBuf != null) {
                 if (byteBuf.isReadable()) {
                     readPending = false;
+                    //如果发生异常时，已经读取到了部分数据，则触发ChannelRead事件
                     pipeline.fireChannelRead(byteBuf);
                 } else {
                     byteBuf.release();
@@ -158,11 +161,13 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
                     //记录本次读取了多少字节数
                     allocHandle.lastBytesRead(doReadBytes(byteBuf));
                     //如果本次没有读取到任何字节，则退出循环 进行下一轮事件轮询
+                    // -1 表示客户端主动关闭了连接close或者shutdownOutput 这里均会返回-1
                     if (allocHandle.lastBytesRead() <= 0) {
                         // nothing was read. release the buffer.
                         byteBuf.release();
                         byteBuf = null;
                         //表示客户端主动发起了连接关闭流程，Netty开始连接关闭处理流程
+                        //当客户端主动关闭连接时（客户端发送fin1），会触发read就绪事件，这里从channel读取的数据会是-1
                         close = allocHandle.lastBytesRead() < 0;
                         if (close) {
                             // There is nothing left to read as we received an EOF.
@@ -187,9 +192,12 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
                 pipeline.fireChannelReadComplete();
 
                 if (close) {
+                    //此时客户端发送fin1（fi_wait_1状态）主动关闭连接，服务端接收到fin，并回复ack进入close_wait状态
+                    //在服务端进入close_wait状态 需要调用close 方法向客户端发送fin_ack，服务端才能结束close_wait状态
                     closeOnRead(pipeline);
                 }
             } catch (Throwable t) {
+                //对端发送 RST 强制关闭连接
                 handleReadException(pipeline, byteBuf, t, close, allocHandle);
             } finally {
                 // Check if there is a readPending which was not processed yet.

@@ -32,6 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public abstract class MultithreadEventExecutorGroup extends AbstractEventExecutorGroup {
 
+    // Reactor线程组中的Reactor集合
     private final EventExecutor[] children;
     private final Set<EventExecutor> readonlyChildren;
     //记录关闭的Reactor个数，当Reactor全部关闭后，才可以认为关闭成功
@@ -117,7 +118,7 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
             @Override
             public void operationComplete(Future<Object> future) throws Exception {
                 if (terminatedChildren.incrementAndGet() == children.length) {
-                    //当所有Reactor关闭后 才认为是关闭成功
+                    //当所有Reactor关闭后 ReactorGroup才认为是关闭成功
                     terminationFuture.setSuccess(null);
                 }
             }
@@ -125,6 +126,7 @@ public abstract class MultithreadEventExecutorGroup extends AbstractEventExecuto
 
         //为所有Reactor添加terminationListener
         for (EventExecutor e: children) {
+            //向每个Reactor注册terminationListener
             e.terminationFuture().addListener(terminationListener);
         }
 

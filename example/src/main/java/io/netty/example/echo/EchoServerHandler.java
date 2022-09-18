@@ -18,6 +18,7 @@ package io.netty.example.echo;
 import io.netty.channel.ChannelHandler.Sharable;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.socket.SocketChannel;
 import io.netty.util.ReferenceCounted;
 
 /**
@@ -31,6 +32,8 @@ public class EchoServerHandler extends ChannelInboundHandlerAdapter {
         ctx.write(msg);
     }
 
+
+
     @Override
     public void channelReadComplete(ChannelHandlerContext ctx) {
         ctx.flush();
@@ -42,4 +45,5 @@ public class EchoServerHandler extends ChannelInboundHandlerAdapter {
         cause.printStackTrace();
         ctx.close();
     }
+
 }

@@ -674,6 +674,8 @@ public final class ChannelOutboundBuffer {
         try {
             inFail = true;
             for (;;) {
+                // 循环清除channelOutboundBuffer中的待发送数据
+                // 将entry从buffer中删除，并释放entry中的bytebuffer，通知promise failed
                 if (!remove0(cause, notify)) {
                     break;
                 }
@@ -705,6 +707,8 @@ public final class ChannelOutboundBuffer {
         }
 
         // Release all unflushed messages.
+        //循环清理channelOutboundBuffer中的unflushedEntry，因为在执行关闭之前有可能用户有一些数据write进来，需要清理掉
+        // Release all unflushed messages.
         try {
             Entry e = unflushedEntry;
             while (e != null) {
@@ -721,6 +725,7 @@ public final class ChannelOutboundBuffer {
         } finally {
             inFail = false;
         }
+        //清理channel用于缓存JDK nioBuffer的 threadLocal缓存NIO_BUFFERS
         clearNioBuffers();
     }
 

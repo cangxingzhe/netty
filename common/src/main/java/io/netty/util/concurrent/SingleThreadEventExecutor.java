@@ -66,7 +66,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     private static final Runnable NOOP_TASK = new Runnable() {
         @Override
         public void run() {
-            // Do nothing.
+            // Do nothing.HttpContentDecompressor
         }
     };
 
@@ -88,6 +88,8 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
     private final CountDownLatch threadLock = new CountDownLatch(1);
     private final Set<Runnable> shutdownHooks = new LinkedHashSet<Runnable>();
+    //addTaskWakesUp = true 表示 当且仅当只有调用addTask方法时 才会唤醒Reactor线程
+    //addTaskWakesUp = false 表示 并不是只有addTask方法才能唤醒Reactor 还有其他方法可以唤醒Reactor 默认设置false
     private final boolean addTaskWakesUp;
     private final int maxPendingTasks;
     private final RejectedExecutionHandler rejectedExecutionHandler;
